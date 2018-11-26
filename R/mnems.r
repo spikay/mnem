@@ -630,7 +630,7 @@ getIC <- function(x, man = FALSE, degree = 4, logtype = 2, pen = 2,
 #' data <- data + rnorm(length(data), 0, 1)
 #' result <- mnemk(data, ks = seq_len(2), starts = 1)
 mnemk <- function(D, ks = seq_len(5), man = FALSE, degree = 4, logtype = 2,
-                  pen = 2, useF = FALSE, Fnorm = FALSE, ...) {
+                  pen = 2, useF = FALSE, Fnorm = FALSE, Jacobian = FALSE, ...) {
     kres <- list()
     kic <- numeric(length(ks))
     kll <- numeric(length(ks))
