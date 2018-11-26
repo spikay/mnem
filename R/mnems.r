@@ -412,6 +412,8 @@ getAffinity <- function(x, affinity = 0, norm = TRUE, logtype = 2, mw = NULL,
 #' @param useF use F (see publication) as complexity instead of phi and theta
 #' @param Fnorm normalize complexity of F, i.e. if two components have the
 #' same entry in F, it is only counted once
+#' @param Jacobian logical. If true, use Jacobian matrix of probability mapping 
+#' function to calculate the model dimension.
 #' @author Martin Pirkl
 #' @return penalized log likelihood
 #' @export
@@ -428,7 +430,7 @@ getAffinity <- function(x, affinity = 0, norm = TRUE, logtype = 2, mw = NULL,
 #' }
 #' print(pen)
 getIC <- function(x, man = FALSE, degree = 4, logtype = 2, pen = 2,
-                  useF = FALSE, Fnorm = FALSE) {
+                  useF = FALSE, Fnorm = FALSE, Jacobian = FALSE) {
     n <- ncol(x$data)
     if (useF) {
         for (i in seq_len(length(x$comp))) {
@@ -450,6 +452,123 @@ getIC <- function(x, man = FALSE, degree = 4, logtype = 2, pen = 2,
         }
         fpar <- sum(fpar)
         fpar <- fpar + length(x$comp) - 1
+    } else if (Jacobian) {
+        K <- length(x$comp) # extract number of mixture components
+        for (i in 1:K){     # define phis and thetas
+          tmp <- transitive.closure(x$comp[[i]]$phi, mat = TRUE)
+          tmp2 <- matrix(0, nrow = nrow(tmp),
+                         ncol = length(x$comp[[i]]$theta))
+          tmp3 <- x$comp[[i]]$theta
+          tmp3[which(tmp3 > nrow(tmp2))] <- 0
+          tmp2[cbind(tmp3, seq_len(ncol(tmp2)))] <- 1
+          assign(paste("phi", i, sep=""), tmp)
+          assign(paste("theta", i, sep=""), tmp2)
+        }
+
+        ns <- nrow(phi1) # number of s-genes (=number of knockdowns)
+        ne <- ncol(theta1) # number of E-genes
+
+        #######################################################################################################################################################
+        ## Create all network states, namely 2^ne-1 states
+
+        network.states <- permutations(2,ne,0:1,repeats.allowed=TRUE)[-1,]
+
+        #######################################################################################################################################################
+        ## Create all network parameters
+
+        # Mixture weights: (ns-1) parameters
+        lambdas.p <- paste("l", 1:K, sep="")
+        lambdas.p[K] <- paste("(1-(", paste(lambdas.p[1:K-1], collapse="+"), "))") # the last mixture weight can be expressed by all others as they must sum up to 1
+
+        # Knockdown parameters: ns*(k-1) parameters
+        knockdowns.p <- paste("k", rep(1:ns, K), sep="")
+        for (i in 1:K){
+          knockdowns.p[i*ns] <- paste("(1-(", paste(knockdowns.p[(ns*i-(ns-1)):(ns*i-1)], collapse="+"), "))")}
+
+        # Conditional parameters for the observed E-genes given the E-gene states:
+        # They are created as they are needed and must be "collected" (not all of them have to be used)
+
+        #######################################################################################################################################################
+        ## Calculation of the likelihood functions for every single network state:
+
+
+        # Go through all network states:
+
+        unique.cond.probs <- c() # Here, we "collect" the conditional probabilities
+
+        for (state in 1:nrow(network.states)){
+
+          net.state <- network.states[state,]
+          joint.probs <- c() # Here we extend every iteration with the calculated joint porbability for a mixture component (without the mixture weights)
+
+          # Go through all mixture components:
+          for (mixcomp in 1:K){
+            phi <- eval(parse(text=paste('phi', mixcomp, sep="")))
+            theta <- eval(parse(text=paste('theta', mixcomp, sep="")))
+            F <- phi%*%theta
+
+            # For all knockdowns in one subgraph (mixture component): Start with constructing cond. probabilities.
+            probs.mixcomp <- matrix(paste("p", 1:ne, mixcomp, net.state, t(F), sep=""), ns, ne, byrow=T) # This creates a matrix of expressions for conditional
+            # probabilities, where rows are knockdowns and columns E-genes.
+
+            for (pp in 1:length(probs.mixcomp)){ # conditional probabilities are pairwise dependent
+              if (substr(probs.mixcomp[pp], nchar(probs.mixcomp[pp])-1, nchar(probs.mixcomp[pp]))=="11"){
+                probs.mixcomp[pp] <- paste("(1-", substr(probs.mixcomp[pp], 1, nchar(probs.mixcomp[pp])-2), "01)", sep="")
+              } else if (substr(probs.mixcomp[pp], nchar(probs.mixcomp[pp])-1, nchar(probs.mixcomp[pp]))=="00"){
+                probs.mixcomp[pp] <- paste("(1-", substr(probs.mixcomp[pp], 1, nchar(probs.mixcomp[pp])-2), "10)", sep="")
+              }
+            }
+
+            # Now we have to create the joint probability for one mixture component for all knockdowns
+            joint.probs.mixcomp <- apply(probs.mixcomp, 1, function(x) paste(x, collapse="*"))
+            joint.probs.mixcomp <- paste(paste(knockdowns.p[(ns*(mixcomp-1)+1):(ns*mixcomp)], joint.probs.mixcomp, sep="*"), collapse="+")
+            joint.probs.mixcomp <- paste("(", joint.probs.mixcomp, ")", sep="")
+
+            # Save the expression for the likelihood of a network state:
+            joint.probs <- c(joint.probs, joint.probs.mixcomp) 
+
+            # "Collect" all conditional parameters for the observed E-genes:
+            unique.cond.probs <- unique(c(as.vector(probs.mixcomp), unique.cond.probs))
+          }
+
+          # Until now, we have calculated the joint probability for our model components. They are saved as lf1 : lfK and look like: ( *(k1*p1+k2*p2+...+kK*pK)
+          # In this step, we have to bring them together, weighted by the mixture weights. 
+          assign(paste("joint.l", state, sep=""), as.formula(paste("~",paste(paste(lambdas.p, joint.probs, sep="*"), collapse=" + "))))  
+        }
+
+
+
+        # Combine all used network parameters into one list, then filter out expressions in brackets
+        network.params <- c(lambdas.p, knockdowns.p[1:ns], unique.cond.probs)
+        network.params <- network.params[substr(network.params,1,1)!="("]
+
+        # Create empty Jacobian matrix: number of states x number of parameters
+        n.row.J <- nrow(network.states)
+        n.col.J <- length(network.params)
+        Jacobian.matrix <- matrix(rep(NA, n.row.J*n.col.J), n.row.J, n.col.J)
+
+        # Derive the joint likelihoods for all states after all network parameters
+        for ( j in 1:n.row.J){
+          assign(paste("deriv", j, sep=""), deriv(eval(parse(text=paste('joint.l', j, sep=""))), network.params, cache.exp=FALSE))
+        }
+
+        # Caluclate the rank five times for different randomly chosen probabilities for the network parameters
+        ranks <- c() # here, the ranks will be saved
+
+
+
+        for (j in 1:5){
+          # Assign random probabilities to the network parameters
+          for (i in 1:n.col.J){
+            assign(network.params[i], runif(1, 0, 1))}
+          # Calculate ranks
+          for (nr in 1:n.row.J){
+            Jacobian.matrix[nr,] <- attributes(eval(eval(parse(text=paste('deriv', nr, sep="")))))$gradient
+          }
+          ranks[j] <- rankMatrix(Jacobian.matrix)
+        }
+
+        fpar <- max(ranks)
     } else {
         if (degree != 5) {
             fpar <- 0
