@@ -1439,6 +1439,8 @@ simulateDnf <- function(dnf, stimuli = NULL, inhibitors = NULL) {
 #' @noRd
 #' @importFrom gtools permutations
 dimJac <- function(x){
+  library(Matrix)
+  library(gtools)
   
   K <- length(x$comp) # extract number of mixture components K
   
